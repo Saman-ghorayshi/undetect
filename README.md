@@ -2,27 +2,28 @@
 
 Alters AI-generated images to reduce AI detection scores. Drop in an image from Midjourney, DALL-E, Stable Diffusion, or any diffusion model output, and the tool applies six processing techniques that disrupt the statistical signatures detectors look for.
 
-Live demo: https://saman-ghorayshi.github.io/undetect/
+Live demo: https://saman-ghorayshi.github.io/undetect/demo/
 
 ## How it works
 
-AI image detectors (Hive, Sightengine, Illuminarty, SynthID-reading tools) identify machine-generated images through several vectors:
+AI image detectors (Hive, Sightengine, DeepAI, Illuminarty, SynthID readers) flag machine-generated images through several vectors:
 
 - **Metadata**: EXIF tags, C2PA provenance watermarks, XMP packets
-- **Pixel patterns**: over-smoothness, unnaturally regular noise distributions
-- **Frequency domain**: DCT coefficient signatures from the diffusion process
-- **Spatial features**: consistent texture regularity, lack of organic imperfections
+- **Pixel statistics**: over-smooth gradients, unnaturally uniform noise distribution
+- **Frequency domain**: DCT coefficient signatures left by the diffusion process
+- **Texture regularity**: consistent micro-patterns, lack of organic imperfections
 
-This tool applies a six-stage pipeline that disrupts each vector:
+This tool applies a 7-stage pipeline that disrupts each vector:
 
-1. **Metadata strip** - rebuilds pixel data into a fresh image object, dropping all EXIF/XMP/C2PA/IPTC tags
-2. **Color jitter** - random brightness, contrast, and saturation shifts break the unnaturally consistent color histograms AI produces
-3. **Resize cycle** - downscale then upscale with Lanczos resampling destroys fine pixel-level patterns
-4. **Film grain** - adds organic monochromatic noise (Gaussian, shaped to mimic analog film) that masks the smooth micro-pixel patterns from diffusion
-5. **Adversarial noise** - uniform pixel perturbations in a controlled range that shift classifier confidence scores without visible degradation
-6. **JPEG round-trip** - re-encodes through JPEG multiple times, scrambling DCT coefficients in the frequency domain
+1. **Metadata strip** - rebuilds pixel data into a fresh image object, dropping EXIF/XMP/C2PA/IPTC
+2. **Color jitter** - small random contrast and saturation shifts (no brightness change, so the image never darkens)
+3. **Resize cycle** - downscale then upscale with Lanczos resampling, breaks pixel-level patterns
+4. **Film grain** - Gaussian monochromatic noise shaped like analog film, masks diffusion smoothness
+5. **Adversarial noise** - uniform per-pixel perturbation in a controlled range, shifts classifier confidence
+6. **FFT lowpass** - Butterworth low-pass filter in the frequency domain, attenuates high-frequency artifacts without ringing (uses butterworth, not hard cut, so DC brightness is preserved)
+7. **JPEG round-trip** - re-encodes through JPEG 1-3 times, scrambling DCT coefficients
 
-Three strength presets (light/medium/heavy) trade image quality for detection disruption. Heavy is for when you need maximum bypass and don't care about artifacting.
+Three strength presets (light/medium/heavy) trade image quality for detection disruption. Each preset was tuned and tested against DeepAI's detector.
 
 ## Install
 
