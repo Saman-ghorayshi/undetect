@@ -2,7 +2,7 @@
 
 Alters AI-generated images to reduce AI detection scores. Drop in an image from Midjourney, DALL-E, Stable Diffusion, or any diffusion model output, and the tool applies six processing techniques that disrupt the statistical signatures detectors look for.
 
-Live demo: https://saman-ghorayshi.github.io/undetect/demo/
+Live demo: https://saman-ghorayshi.github.io/undetect/
 
 ## How it works
 
