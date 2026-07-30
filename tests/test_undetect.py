@@ -140,6 +140,18 @@ def test_fft_preserves_brightness():
     # DC term is the mean — a uniform image is all DC, so it should stay ~same
     assert abs(float(out.mean()) - 128.0) < 5.0, f"mean {out.mean()} drifted from 128"
 
+def test_fft_shelf_preserves_mid_freq():
+    """Shelf filter should not attenuate low/mid frequencies."""
+    arr = np.full((64, 64, 3), 128, dtype=np.uint8)
+    # add a low-freq sinusoidal pattern (should pass through mostly intact)
+    for y in range(64):
+        for x in range(64):
+            arr[y, x] = 128 + int(30 * np.sin(x * 0.1) * np.cos(y * 0.1))
+    out = fft_lowpass(arr, cutoff=0.65, transition=0.12)
+    # mid-freq content should survive
+    diff = np.abs(out.astype(float) - arr.astype(float)).mean()
+    assert diff < 3.0, f"mid-freq content modified too much: diff={diff:.2f}"
+
 # --- color jitter tests ---
 
 def test_color_jitter_returns_image():

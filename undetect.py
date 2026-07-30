@@ -27,36 +27,39 @@ except ImportError:
 
 STRENGTH_PROFILES = {
     "light": {
-        "grain_amount": 5,
+        "grain_amount": 4,
         "jpeg_quality": 88,
         "jpeg_roundtrips": 2,
-        "resize_factor": 0.82,
+        "resize_factor": 0.85,
         "resize_cycles": 1,
         "noise_strength": 3,
-        "fft_cutoff": 0.4,
-        "color_jitter": 0.05,
+        "fft_cutoff": 0.50,
+        "fft_transition": 0.08,
+        "color_jitter": 0.04,
         "saturation_shift": 1.02,
     },
     "medium": {
         "grain_amount": 6,
         "jpeg_quality": 85,
         "jpeg_roundtrips": 2,
-        "resize_factor": 0.75,
+        "resize_factor": 0.80,
         "resize_cycles": 1,
-        "noise_strength": 3,
-        "fft_cutoff": 0.3,
-        "color_jitter": 0.06,
+        "noise_strength": 4,
+        "fft_cutoff": 0.40,
+        "fft_transition": 0.08,
+        "color_jitter": 0.05,
         "saturation_shift": 1.03,
     },
     "heavy": {
         "grain_amount": 8,
         "jpeg_quality": 82,
         "jpeg_roundtrips": 2,
-        "resize_factor": 0.78,
+        "resize_factor": 0.75,
         "resize_cycles": 1,
-        "noise_strength": 8,
-        "fft_cutoff": 0.3,
-        "color_jitter": 0.07,
+        "noise_strength": 6,
+        "fft_cutoff": 0.30,
+        "fft_transition": 0.08,
+        "color_jitter": 0.06,
         "saturation_shift": 1.04,
     },
 }
@@ -78,9 +81,22 @@ def strip_metadata(img):
     return clean
 
 
-def add_film_grain(arr, amount=8):
-    """Gaussian noise, monochromatic. Masks diffusion smoothness."""
+def add_film_grain(arr, amount=8, luma_weight=True):
+    """
+    Gaussian noise, monochromatic. Masks diffusion smoothness.
+
+    When luma_weight=True, noise amplitude scales with the inverse luminance
+    of each pixel — more grain in dark areas (where detectors look for
+    smooth gradient evidence) and less in bright/detail areas (so fabric
+    texture and skin detail survive). Mirrors analog film which has
+    more grain in shadows than highlights.
+    """
     noise = np.random.normal(0, amount, arr.shape[:2])
+    if luma_weight:
+        # weights: 1.0 in deep shadows, gradually less up to 0.2 in highlights
+        luma = np.array(arr).astype(np.float32).mean(axis=2)
+        weight = 1.0 - 0.8 * np.clip(luma / 255.0, 0, 1)
+        noise = noise * weight
     noise = noise[:, :, np.newaxis]
     if arr.ndim == 3:
         noise = np.repeat(noise, arr.shape[2], axis=2)
@@ -119,28 +135,35 @@ def adversarial_noise(arr, strength=4):
     return out.astype(np.uint8)
 
 
-def fft_lowpass(arr, cutoff=0.3):
+def fft_lowpass(arr, cutoff=0.3, transition=0.15):
     """
-    Butterworth lowpass in frequency domain. Attenuates high-freq AI
-    artifacts while keeping DC (brightness).  cutoff is fraction of
-    Nyquist radius; smaller = more aggressive.
+    Gentle high-frequency shelf cut. Only attenuates frequencies above
+    `cutoff` fraction of Nyquist, with a smooth `transition` band.
+    Low and mid frequencies (texture, detail) pass through untouched.
 
-    Per the arxiv 2410.01574 paper, frequency-domain perturbation
-    drops detector AUC by 40-60%. A smooth lowpass avoids the ringing
-    artifacts a hard cutoff introduces.
+    GAN/diffusion fingerprints concentrate near the Nyquist edge (regular
+    checkerboard/grid patterns from upsampling layers). A narrow shelf
+    targets those without killing fabric/hair/skin texture.
+
+    Per ERASE (TDSC 2026): preserve low-frequency content (SSIM constraint),
+    only perturb high-frequency artifact band.
     """
     if cutoff <= 0:
         return arr
     h, w = arr.shape[:2]
     cy, cx = h // 2, w // 2
-    # normalized distance from center (DC term)
     yy = np.arange(h) - cy
     xx = np.arange(w) - cx
     yy, xx = np.meshgrid(yy, xx, indexing='ij')
     radius = np.sqrt((yy / (h / 2)) ** 2 + (xx / (w / 2)) ** 2)
-    # butterworth: 1 / (1 + (r/r0)^4). r0 is the -3dB point
-    r0 = cutoff
-    mask = 1.0 / (1.0 + (radius / r0) ** 4)
+    # smooth roll-off: full strength below cutoff, zero above cutoff+transition
+    # using a cosine window in the transition band to avoid ringing
+    mask = np.ones_like(radius)
+    lo = cutoff - transition
+    hi = cutoff + transition
+    band = (radius >= lo) & (radius <= hi)
+    mask[band] = 0.5 * (1.0 + np.cos(np.pi * (radius[band] - lo) / (hi - lo)))
+    mask[radius > hi] = 0.0
 
     out = np.zeros_like(arr, dtype=np.float32)
     for c in range(arr.shape[2]):
@@ -182,7 +205,7 @@ def process_image(img, strength="medium", skip_metadata=False,
     if not skip_noise:
         arr = adversarial_noise(arr, cfg["noise_strength"])
     if not skip_fft and cfg["fft_cutoff"] > 0:
-        arr = fft_lowpass(arr, cfg["fft_cutoff"])
+        arr = fft_lowpass(arr, cfg["fft_cutoff"], cfg.get("fft_transition", 0.12))
 
     img = Image.fromarray(arr)
 
