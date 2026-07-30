@@ -17,6 +17,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageEnhance
+from scipy.fft import dctn, idctn
 
 try:
     import piexif
@@ -32,9 +33,9 @@ STRENGTH_PROFILES = {
         "jpeg_roundtrips": 2,
         "resize_factor": 0.85,
         "resize_cycles": 1,
-        "noise_strength": 3,
-        "fft_cutoff": 0.50,
-        "fft_transition": 0.08,
+        "dct_band_lo": 0.40,
+        "dct_band_hi": 0.85,
+        "dct_strength": 0.5,
         "color_jitter": 0.04,
         "saturation_shift": 1.02,
     },
@@ -44,9 +45,9 @@ STRENGTH_PROFILES = {
         "jpeg_roundtrips": 2,
         "resize_factor": 0.80,
         "resize_cycles": 1,
-        "noise_strength": 4,
-        "fft_cutoff": 0.40,
-        "fft_transition": 0.08,
+        "dct_band_lo": 0.30,
+        "dct_band_hi": 0.85,
+        "dct_strength": 0.7,
         "color_jitter": 0.05,
         "saturation_shift": 1.03,
     },
@@ -56,9 +57,9 @@ STRENGTH_PROFILES = {
         "jpeg_roundtrips": 2,
         "resize_factor": 0.75,
         "resize_cycles": 1,
-        "noise_strength": 6,
-        "fft_cutoff": 0.30,
-        "fft_transition": 0.08,
+        "dct_band_lo": 0.30,
+        "dct_band_hi": 0.85,
+        "dct_strength": 0.75,
         "color_jitter": 0.06,
         "saturation_shift": 1.04,
     },
@@ -95,8 +96,14 @@ def add_film_grain(arr, amount=8, luma_weight=True):
     if luma_weight:
         # weights: 1.0 in deep shadows, gradually less up to 0.2 in highlights
         luma = np.array(arr).astype(np.float32).mean(axis=2)
-        weight = 1.0 - 0.8 * np.clip(luma / 255.0, 0, 1)
-        noise = noise * weight
+        # also scale by inverse gradient: more noise in flat areas, less in edges
+        gx = np.gradient(luma, axis=1)
+        gy = np.gradient(luma, axis=0)
+        grad_mag = np.sqrt(gx**2 + gy**2)
+        grad_norm = np.clip(grad_mag / (grad_mag.max() + 1e-6), 0, 1)
+        luma_weight_map = 1.0 - 0.8 * np.clip(luma / 255.0, 0, 1)
+        edge_weight = 1.0 - 0.7 * grad_norm  # less noise on edges
+        noise = noise * luma_weight_map * edge_weight
     noise = noise[:, :, np.newaxis]
     if arr.ndim == 3:
         noise = np.repeat(noise, arr.shape[2], axis=2)
@@ -128,50 +135,51 @@ def resize_cycle(img, factor=0.72, cycles=1):
     return current
 
 
-def adversarial_noise(arr, strength=4):
-    """Uniform per-pixel perturbation. Shifts classifier scores."""
-    noise = np.random.randint(-strength, strength + 1, arr.shape, dtype=np.int16)
-    out = np.clip(arr.astype(np.int16) + noise, 0, 255)
-    return out.astype(np.uint8)
-
-
-def fft_lowpass(arr, cutoff=0.3, transition=0.15):
+def dct_band_perturb(arr, band_lo=0.4, band_hi=0.8, strength=0.5):
     """
-    Gentle high-frequency shelf cut. Only attenuates frequencies above
-    `cutoff` fraction of Nyquist, with a smooth `transition` band.
-    Low and mid frequencies (texture, detail) pass through untouched.
+    DCT-domain frequency-band perturbation. Targets the specific frequency
+    bands where AI-generated fingerprints concentrate (mid-high per FBA2D,
+    arxiv 2512.09264) without touching the DC/low bands (brightness,
+    structure) or the very high bands (fine detail).
 
-    GAN/diffusion fingerprints concentrate near the Nyquist edge (regular
-    checkerboard/grid patterns from upsampling layers). A narrow shelf
-    targets those without killing fabric/hair/skin texture.
+    Two operations in the target band:
+    - attenuate: scale coefficients down by `strength` (removes the AI
+      fingerprint energy the way a lowpass does, but surgical)
+    - perturb: add small random noise to break regularity
 
-    Per ERASE (TDSC 2026): preserve low-frequency content (SSIM constraint),
-    only perturb high-frequency artifact band.
+    Works on 8x8 blocks (same as JPEG DCT structure).
     """
-    if cutoff <= 0:
+    if strength <= 0:
         return arr
-    h, w = arr.shape[:2]
-    cy, cx = h // 2, w // 2
-    yy = np.arange(h) - cy
-    xx = np.arange(w) - cx
-    yy, xx = np.meshgrid(yy, xx, indexing='ij')
-    radius = np.sqrt((yy / (h / 2)) ** 2 + (xx / (w / 2)) ** 2)
-    # smooth roll-off: full strength below cutoff, zero above cutoff+transition
-    # using a cosine window in the transition band to avoid ringing
-    mask = np.ones_like(radius)
-    lo = cutoff - transition
-    hi = cutoff + transition
-    band = (radius >= lo) & (radius <= hi)
-    mask[band] = 0.5 * (1.0 + np.cos(np.pi * (radius[band] - lo) / (hi - lo)))
-    mask[radius > hi] = 0.0
-
     out = np.zeros_like(arr, dtype=np.float32)
-    for c in range(arr.shape[2]):
-        channel = arr[:, :, c].astype(np.float32)
-        fft = np.fft.fftshift(np.fft.fft2(channel))
-        fft = fft * mask
-        channel_back = np.fft.ifft2(np.fft.ifftshift(fft)).real
-        out[:, :, c] = channel_back
+    h, w = arr.shape[:2]
+
+    ucord = np.arange(8)
+    uy, ux = np.meshgrid(ucord, ucord, indexing='ij')
+    freq = np.sqrt((ux / 8.0)**2 + (uy / 8.0)**2)
+    band_mask = (freq >= band_lo) & (freq <= band_hi)
+
+    for c in range(arr.shape[2]) if arr.ndim == 3 else [0]:
+        channel = arr[:, :, c] if arr.ndim == 3 else arr
+        ch = channel.astype(np.float32).copy()
+        for y in range(0, h - 7, 8):
+            for x in range(0, w - 7, 8):
+                block = ch[y:y+8, x:x+8]
+                coeffs = dctn(block, type=2, norm='ortho')
+                # attenuate target band (reduce fingerprint energy)
+                atten = np.ones((8, 8), dtype=np.float32)
+                atten[band_mask] = 1.0 - strength
+                # add random perturbation to break regularity
+                noise = np.zeros((8, 8), dtype=np.float32)
+                noise[band_mask] = np.random.normal(0, strength * 2,
+                                                     size=band_mask.sum())
+                coeffs = coeffs * atten + noise
+                ch[y:y+8, x:x+8] = idctn(coeffs, type=2, norm='ortho')
+        if arr.ndim == 3:
+            out[:, :, c] = ch
+        else:
+            out = ch
+
     return np.clip(out, 0, 255).astype(np.uint8)
 
 
@@ -185,8 +193,8 @@ def color_jitter(img, jitter=0.06, saturation=1.03):
 
 def process_image(img, strength="medium", skip_metadata=False,
                   skip_grain=False, skip_jpeg=False,
-                  skip_resize=False, skip_noise=False,
-                  skip_fft=False, skip_color=False):
+                  skip_resize=False, skip_dct=False,
+                  skip_color=False):
     if strength not in STRENGTH_PROFILES:
         raise ValueError(f"strength must be one of {list(STRENGTH_PROFILES)}")
     cfg = STRENGTH_PROFILES[strength]
@@ -202,10 +210,9 @@ def process_image(img, strength="medium", skip_metadata=False,
 
     if not skip_grain:
         arr = add_film_grain(arr, cfg["grain_amount"])
-    if not skip_noise:
-        arr = adversarial_noise(arr, cfg["noise_strength"])
-    if not skip_fft and cfg["fft_cutoff"] > 0:
-        arr = fft_lowpass(arr, cfg["fft_cutoff"], cfg.get("fft_transition", 0.12))
+    if not skip_dct and cfg["dct_strength"] > 0:
+        arr = dct_band_perturb(arr, cfg["dct_band_lo"], cfg["dct_band_hi"],
+                               cfg["dct_strength"])
 
     img = Image.fromarray(arr)
 
@@ -294,8 +301,7 @@ def main():
     p_proc.add_argument("--skip-grain", action="store_true")
     p_proc.add_argument("--skip-jpeg", action="store_true")
     p_proc.add_argument("--skip-resize", action="store_true")
-    p_proc.add_argument("--skip-noise", action="store_true")
-    p_proc.add_argument("--skip-fft", action="store_true")
+    p_proc.add_argument("--skip-dct", action="store_true")
     p_proc.add_argument("--skip-color", action="store_true")
 
     p_batch = sub.add_parser("batch", help="process all images in a directory")
@@ -319,8 +325,7 @@ def main():
             skip_grain=args.skip_grain,
             skip_jpeg=args.skip_jpeg,
             skip_resize=args.skip_resize,
-            skip_noise=args.skip_noise,
-            skip_fft=args.skip_fft,
+            skip_dct=args.skip_dct,
             skip_color=args.skip_color,
         )
         print(f"saved: {out}")

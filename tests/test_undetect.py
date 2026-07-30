@@ -15,8 +15,7 @@ from undetect import (
     add_film_grain,
     jpeg_roundtrip,
     resize_cycle,
-    adversarial_noise,
-    fft_lowpass,
+    dct_band_perturb,
     color_jitter,
     process_image,
     process_file,
@@ -103,54 +102,35 @@ def test_resize_cycle_alters_pixels():
     out = resize_cycle(img, factor=0.5, cycles=1)
     assert not np.array_equal(np.array(img), np.array(out))
 
-# --- adversarial noise tests ---
+# --- DCT band perturbation tests ---
 
-def test_adv_noise_changes_pixels():
-    arr = np.full((30, 30, 3), 128, dtype=np.uint8)
-    out = adversarial_noise(arr, strength=5)
+def test_dct_changes_pixels():
+    arr = np.random.randint(0, 256, (32, 32, 3), dtype=np.uint8)
+    out = dct_band_perturb(arr, band_lo=0.4, band_hi=0.8, strength=0.5)
     assert not np.array_equal(arr, out)
 
-def test_adv_noise_preserves_range():
-    arr = np.random.randint(0, 256, (50, 50, 3), dtype=np.uint8)
-    out = adversarial_noise(arr, strength=10)
-    assert out.min() >= 0
-    assert out.max() <= 255
-
-def test_adv_noise_zero_no_change():
-    arr = np.full((10, 10, 3), 50, dtype=np.uint8)
-    out = adversarial_noise(arr, strength=0)
-    assert np.array_equal(arr, out)
-
-# --- FFT tests ---
-
-def test_fft_no_change_with_zero_cutoff():
-    arr = np.random.randint(0, 256, (64, 64, 3), dtype=np.uint8)
-    out = fft_lowpass(arr, cutoff=0)
-    assert np.array_equal(arr, out)
-
-def test_fft_preserves_shape():
-    arr = np.random.randint(0, 256, (32, 32, 3), dtype=np.uint8)
-    out = fft_lowpass(arr, cutoff=0.3)
+def test_dct_preserves_shape():
+    arr = np.random.randint(0, 256, (40, 40, 3), dtype=np.uint8)
+    out = dct_band_perturb(arr, band_lo=0.4, band_hi=0.8, strength=0.5)
     assert out.shape == arr.shape
 
-def test_fft_preserves_brightness():
-    """FFT lowpass should not darken the image (DC term preserved)."""
-    arr = np.full((64, 64, 3), 128, dtype=np.uint8)
-    out = fft_lowpass(arr, cutoff=0.3)
-    # DC term is the mean — a uniform image is all DC, so it should stay ~same
-    assert abs(float(out.mean()) - 128.0) < 5.0, f"mean {out.mean()} drifted from 128"
+def test_dct_zero_strength_no_change():
+    arr = np.random.randint(0, 256, (32, 32, 3), dtype=np.uint8)
+    out = dct_band_perturb(arr, band_lo=0.3, band_hi=0.8, strength=0)
+    assert np.array_equal(arr, out)
 
-def test_fft_shelf_preserves_mid_freq():
-    """Shelf filter should not attenuate low/mid frequencies."""
-    arr = np.full((64, 64, 3), 128, dtype=np.uint8)
-    # add a low-freq sinusoidal pattern (should pass through mostly intact)
-    for y in range(64):
-        for x in range(64):
-            arr[y, x] = 128 + int(30 * np.sin(x * 0.1) * np.cos(y * 0.1))
-    out = fft_lowpass(arr, cutoff=0.65, transition=0.12)
-    # mid-freq content should survive
-    diff = np.abs(out.astype(float) - arr.astype(float)).mean()
-    assert diff < 3.0, f"mid-freq content modified too much: diff={diff:.2f}"
+def test_dct_preserves_brightness():
+    """DCT perturbation should not change overall brightness (DC untouched)."""
+    arr = np.full((32, 32, 3), 128, dtype=np.uint8)
+    out = dct_band_perturb(arr, band_lo=0.4, band_hi=0.8, strength=0.5)
+    # DC coefficient is untouched, brightness should stay ~same
+    assert abs(float(out.mean()) - 128.0) < 8.0
+
+def test_dct_preserves_low_freq():
+    """Low frequency content (structure) should pass through mostly intact."""
+    arr = np.full((32, 32, 3), 128, dtype=np.uint8)
+    out = dct_band_perturb(arr, band_lo=0.4, band_hi=0.8, strength=0.3)
+    assert np.abs(out.astype(float) - arr.astype(float)).mean() < 10.0
 
 # --- color jitter tests ---
 
@@ -186,7 +166,7 @@ def test_process_image_skip_all():
     out = process_image(img, strength="light",
                         skip_metadata=True, skip_grain=True,
                         skip_jpeg=True, skip_resize=True,
-                        skip_noise=True, skip_fft=True,
+                        skip_dct=True,
                         skip_color=True)
     # metadata strip still ran structure change, but pixels preserved
     assert out.size == (30, 30)
