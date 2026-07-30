@@ -1,6 +1,6 @@
 # undetect
 
-Alters AI-generated images to reduce AI detection scores. Drop in an image from Midjourney, DALL-E, Stable Diffusion, or any diffusion model output, and the tool applies six processing techniques that disrupt the statistical signatures detectors look for.
+Alters AI-generated images to reduce AI detection scores. Drop in an image from Midjourney, DALL-E, Stable Diffusion, or any diffusion model output, and the tool applies processing techniques that disrupt the statistical signatures detectors look for.
 
 Live demo: https://saman-ghorayshi.github.io/undetect/
 
@@ -13,22 +13,23 @@ AI image detectors (Hive, Sightengine, DeepAI, Illuminarty, SynthID readers) fla
 - **Frequency domain**: DCT coefficient signatures left by the diffusion process
 - **Texture regularity**: consistent micro-patterns, lack of organic imperfections
 
-This tool applies a 7-stage pipeline that disrupts each vector:
+Research shows generated images have sparse high-frequency content compared to real images, which have rich high-frequency detail (FBA2D, arxiv 2512.09264). Det exploit this spectral difference. This tool targets the specific frequency bands where AI fingerprints concentrate.
+
+The pipeline:
 
 1. **Metadata strip** - rebuilds pixel data into a fresh image object, dropping EXIF/XMP/C2PA/IPTC
-2. **Color jitter** - small random contrast and saturation shifts (no brightness change, so the image never darkens)
+2. **Color jitter** - small random contrast and saturation shifts (brightness only goes up, so the image never darkens)
 3. **Resize cycle** - downscale then upscale with Lanczos resampling, breaks pixel-level patterns
-4. **Film grain** - Gaussian monochromatic noise shaped like analog film, masks diffusion smoothness
-5. **Adversarial noise** - uniform per-pixel perturbation in a controlled range, shifts classifier confidence
-6. **FFT lowpass** - Butterworth low-pass filter in the frequency domain, attenuates high-frequency artifacts without ringing (uses butterworth, not hard cut, so DC brightness is preserved)
-7. **JPEG round-trip** - re-encodes through JPEG 1-3 times, scrambling DCT coefficients
+4. **Film grain** - Gaussian monochromatic noise weighted by inverse luminance AND inverse gradient. More grain in dark flat areas (where detectors look for AI smoothness), less in bright edge/detail areas (so fabric texture and skin pores survive)
+5. **DCT band perturbation** - decomposes each 8x8 block into DCT coefficients and selectively attenuates + perturbs the mid-high frequency bands where AI fingerprints live. Leaves DC and low frequencies (brightness, structure) and very high frequencies (fine detail) untouched. Based on the frequency-band attack approach from FBA2D (arxiv 2512.09264) and the low-frequency preservation principle from ERASE (IEEE TDSC 2026)
+6. **JPEG round-trip** - re-encodes through JPEG 1-2 times, scrambling DCT coefficients
 
 Three strength presets (light/medium/heavy) trade image quality for detection disruption. Each preset was tuned and tested against DeepAI's detector.
 
 ## Install
 
 ```
-pip install Pillow numpy piexif
+pip install Pillow numpy scipy piexif
 ```
 
 ## Usage
@@ -55,7 +56,7 @@ python undetect.py analyze image.png
 
 Skip specific stages (for testing individual techniques):
 ```
-python undetect.py process image.png --skip-fft --skip-resize --strength heavy
+python undetect.py process image.png --skip-dct --skip-resize --strength heavy
 ```
 
 ## Python API
@@ -72,19 +73,23 @@ clean.save("clean.jpg", quality=88)
 
 Tested against DeepAI's AI Image Detector (https://deepai.org/ai-image-detector):
 
-| Image | Before | After (heavy) | Classification |
-|-------|--------|---------------|-----------------|
+| Image | Before | After (medium) | Classification |
+|-------|--------|----------------|-----------------|
 | Synthetic gradient | 56.5% AI | 38.8% Real | flipped |
-| Real AI portrait | 97.0% AI | 22.9% Real | flipped |
+| Real AI portrait | 97.0% AI | 19.0% Real | flipped |
 
 The detector's own indicators flipped from "overly perfect symmetry, unnatural lighting, blurred edges" to "natural skin texture, organic shadow falloff, authentic depth of field."
 
+Quality metrics for the real AI portrait (506x675 JPEG):
+- Medium: PSNR 32.0dB, brightness delta -1.4 (original mean 62.7, output 61.3)
+- Heavy: PSNR 31.0dB, brightness delta -1.2
+
 ## Known limitations
 
-- The FFT frequency domain method can introduce visible ringing artifacts on images with strong high-contrast edges. It only runs on heavy strength.
-- JPEG round-trip is lossy by design. Each pass reduces quality. The tool caps at 3 passes (heavy) to avoid excessive degradation.
-- Resize cycle with heavy strength (factor 0.55) can soften small details. Use light (0.85) if preserving texture matters.
-- The browser demo skips the FFT stage because it's too slow on large images in JavaScript. The Python CLI runs all stages.
+- The DCT band perturbation introduces subtle coefficient changes that are invisible at normal viewing but may be detectable by statistical analysis tools.
+- JPEG round-trip is lossy by design. Each pass reduces quality. The tool caps at 2 passes to avoid excessive degradation.
+- Resize cycle with heavy strength (factor 0.75) can soften small details. Use light (0.85) if preserving texture matters.
+- The browser demo skips the DCT stage because it requires scipy. The Python CLI runs all stages.
 - This tool disrupts common detection vectors, but adversarial methods are an arms race. New detector models may adapt to these exact techniques.
 - Metadata stripping is intentional. If you need provenance tracking (e.g. C2PA for legal compliance), this tool is not for you.
 

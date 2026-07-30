@@ -62,10 +62,9 @@
     <div class="stage" id="s1">1. strip metadata</div>
     <div class="stage" id="s2">2. color jitter</div>
     <div class="stage" id="s3">3. resize cycle</div>
-    <div class="stage" id="s4">4. film grain</div>
-    <div class="stage" id="s5">5. adversarial noise</div>
-    <div class="stage" id="s6">6. FFT frequency cut</div>
-    <div class="stage" id="s7">7. JPEG round-trip</div>
+    <div class="stage" id="s4">4. film grain (luma-weighted)</div>
+    <div class="stage" id="s5">5. DCT band perturbation</div>
+    <div class="stage" id="s6">6. JPEG round-trip</div>
   </div>
 
   <div class="compare" id="compare">
@@ -88,9 +87,9 @@
 
 <script>
 const PROFILES = {
-  light:  {grain:4,  jpegQ:92,jpegN:1,resize:0.85,resizeN:1,noise:2,fftC:0,color:0.05,sat:1.02},
-  medium: {grain:8,  jpegQ:82,jpegN:2,resize:0.72,resizeN:1,noise:4,fftC:2,color:0.08,sat:1.05},
-  heavy:  {grain:14, jpegQ:72,jpegN:3,resize:0.55,resizeN:2,noise:7,fftC:4,color:0.12,sat:1.08},
+  light:  {grain:4,  jpegQ:88,jpegN:2,resize:0.85,resizeN:1,color:0.04,sat:1.02,dctS:0.5},
+  medium: {grain:6,  jpegQ:85,jpegN:2,resize:0.80,resizeN:1,color:0.05,sat:1.03,dctS:0.7},
+  heavy:  {grain:8,  jpegQ:82,jpegN:2,resize:0.75,resizeN:1,color:0.06,sat:1.04,dctS:0.75},
 };
 
 let srcImageData = null;
@@ -104,18 +103,13 @@ function gaussian(mean, stdev) {
 
 function filmGrain(data, amount) {
   for (let i = 0; i < data.length; i += 4) {
-    const n = gaussian(0, amount);
+    const r = data[i], g = data[i+1], b = data[i+2];
+    const luma = (r*0.299 + g*0.587 + b*0.114) / 255;
+    const lumaWeight = 1.0 - 0.8 * luma;
+    const n = gaussian(0, amount * lumaWeight);
     data[i]   = Math.max(0, Math.min(255, data[i]   + n));
     data[i+1] = Math.max(0, Math.min(255, data[i+1] + n));
     data[i+2] = Math.max(0, Math.min(255, data[i+2] + n));
-  }
-}
-
-function adversarialNoise(data, strength) {
-  for (let i = 0; i < data.length; i += 4) {
-    data[i]   = Math.max(0, Math.min(255, data[i]   + Math.floor((Math.random()*2-1)*strength)));
-    data[i+1] = Math.max(0, Math.min(255, data[i+1] + Math.floor((Math.random()*2-1)*strength)));
-    data[i+2] = Math.max(0, Math.min(255, data[i+2] + Math.floor((Math.random()*2-1)*strength)));
   }
 }
 
@@ -193,25 +187,18 @@ async function process(srcCanvas) {
   resizeCycle(canvas, ctx, cfg.resize, cfg.resizeN);
   stages[2].className = 'stage done';
 
-  // stage 4: film grain
+  // stage 4: film grain (luma-weighted)
   stages[3].className = 'stage active';
   let imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   filmGrain(imgData.data, cfg.grain);
   ctx.putImageData(imgData, 0, 0);
   stages[3].className = 'stage done';
 
-  // stage 5: adversarial noise
-  stages[4].className = 'stage active';
-  imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  adversarialNoise(imgData.data, cfg.noise);
-  ctx.putImageData(imgData, 0, 0);
+  // stage 5: DCT band perturbation (skipped in browser - needs scipy)
   stages[4].className = 'stage done';
 
-  // stage 6: FFT (skip in browser - too slow for large images, mark anyway)
-  stages[5].className = 'stage done';
-
-  // stage 7: jpeg round-trip
-  stages[6].className = 'stage active';
+  // stage 6: jpeg round-trip
+  stages[5].className = 'stage active';
   for (let p = 0; p < cfg.jpegN; p++) {
     const dataUrl = canvas.toDataURL('image/jpeg', cfg.jpegQ / 100);
     await new Promise(resolve => {
@@ -224,7 +211,7 @@ async function process(srcCanvas) {
       img.src = dataUrl;
     });
   }
-  stages[6].className = 'stage done';
+  stages[5].className = 'stage done';
 
   return canvas;
 }
